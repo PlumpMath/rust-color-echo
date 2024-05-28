@@ -51,6 +51,7 @@
               ./Cargo.lock
 
               # Unfortunately this approach requires IFD (import-from-derivation)
+              # 불행하게도 이 접근 방식에는 IFD(파생에서 가져오기)가 필요합니다.              
               # otherwise Nix will refuse to read the Cargo.lock from our toolchain
               # (unless we build with `--impure`).
               #
