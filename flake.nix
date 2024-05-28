@@ -64,7 +64,7 @@
           };
 
           # cargoExtraArgs = "-Z build-std --target x86_64-unknown-linux-gnu";
-          cargoExtraArgs = "-Z build-std";
+          # cargoExtraArgs = "-Z build-std";
           # cargoExtraArgs = if system == "x86_64-linux"
           #                  then "-Z build-std --target x86_64-unknown-linux-gnu"
           #                  else (if system == "x86_64-darwin"
