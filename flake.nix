@@ -1,5 +1,5 @@
 {
-  description = "Cross compiling a rust program using rust-overlay";
+  description = "Build a cargo project while also compiling the standard library";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -20,98 +20,60 @@
     };
   };
 
-  outputs = { nixpkgs, crane, flake-utils, rust-overlay, ... }:
-    flake-utils.lib.eachDefaultSystem (localSystem:
+  outputs = { self, nixpkgs, crane, flake-utils, rust-overlay, ... }:
+    flake-utils.lib.eachSystem [ "x86_64-linux" "x86_64-darwin" "aarch64-darwin" ] (system:
       let
-        # Replace with the system you want to build for
-        crossSystem = "aarch64-linux";
-
         pkgs = import nixpkgs {
-          inherit crossSystem localSystem;
+          inherit system;
           overlays = [ (import rust-overlay) ];
         };
 
-        rustToolchain = pkgs.pkgsBuildHost.rust-bin.stable.latest.default.override {
-          targets = [ "aarch64-unknown-linux-gnu" ];
-        };
+        rustToolchain = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+          extensions = [ "rust-src" "rust-std" "rust-analyzer" ];
+          targets = [ "x86_64-unknown-linux-gnu" "x86_64-apple-darwin" "aarch64-apple-darwin" ];
+        });
 
+        # NB: we don't need to overlay our custom toolchain for the *entire*
+        # pkgs (which would require rebuidling anything else which uses rust).
+        # Instead, we just want to update the scope that crane will use by appending
+        # our specific toolchain there.
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        # Note: we have to use the `callPackage` approach here so that Nix
-        # can "splice" the packages in such a way that dependencies are
-        # compiled for the appropriate targets. If we did not do this, we
-        # would have to manually specify things like
-        # `nativeBuildInputs = with pkgs.pkgsBuildHost; [ someDep ];` or
-        # `buildInputs = with pkgs.pkgsHostHost; [ anotherDep ];`.
-        #
-        # Normally you can stick this function into its own file and pass
-        # its path to `callPackage`.
-        crateExpression =
-          { openssl
-          , libiconv
-          , lib
-          , pkg-config
-          , qemu
-          , stdenv
-          }:
-          craneLib.buildPackage {
-            src = craneLib.cleanCargoSource (craneLib.path ./.);
-            strictDeps = true;
+        src = craneLib.cleanCargoSource (craneLib.path ./.);
 
-            # Build-time tools which are target agnostic. build = host = target = your-machine.
-            # Emulators should essentially also go `nativeBuildInputs`. But with some packaging issue,
-            # currently it would cause some rebuild.
-            # We put them here just for a workaround.
-            # See: https://github.com/NixOS/nixpkgs/pull/146583
-            depsBuildBuild = [
-              qemu
+        rust-color-echo = craneLib.buildPackage {
+          inherit src;
+          strictDeps = true;
+
+          cargoVendorDir = craneLib.vendorMultipleCargoDeps {
+            inherit (craneLib.findCargoFiles src) cargoConfigs;
+            cargoLockList = [
+              ./Cargo.lock
+
+              # Unfortunately this approach requires IFD (import-from-derivation)
+              # otherwise Nix will refuse to read the Cargo.lock from our toolchain
+              # (unless we build with `--impure`).
+              #
+              # Another way around this is to manually copy the rustlib `Cargo.lock`
+              # to the repo and import it with `./path/to/rustlib/Cargo.lock` which
+              # will avoid IFD entirely but will require manually keeping the file
+              # up to date!
+              "${rustToolchain.passthru.availableComponents.rust-src}/lib/rustlib/src/rust/Cargo.lock"
             ];
-
-            # Dependencies which need to be build for the current platform
-            # on which we are doing the cross compilation. In this case,
-            # pkg-config needs to run on the build platform so that the build
-            # script can find the location of openssl. Note that we don't
-            # need to specify the rustToolchain here since it was already
-            # overridden above.
-            nativeBuildInputs = [
-              pkg-config
-            ] ++ lib.optionals stdenv.buildPlatform.isDarwin [
-              libiconv
-            ];
-
-            # Dependencies which need to be built for the platform on which
-            # the binary will run. In this case, we need to compile openssl
-            # so that it can be linked with our executable.
-            buildInputs = [
-              # Add additional build inputs here
-              openssl
-            ];
-
-            # Tell cargo about the linker and an optional emulater. So they can be used in `cargo build`
-            # and `cargo run`.
-            # Environment variables are in format `CARGO_TARGET_<UPPERCASE_UNDERSCORE_RUST_TRIPLE>_LINKER`.
-            # They are also be set in `.cargo/config.toml` instead.
-            # See: https://doc.rust-lang.org/cargo/reference/config.html#target
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = "${stdenv.cc.targetPrefix}cc";
-            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER = "qemu-aarch64";
-
-            # Tell cargo which target we want to build (so it doesn't default to the build system).
-            # We can either set a cargo flag explicitly with a flag or with an environment variable.
-            cargoExtraArgs = "--target aarch64-unknown-linux-gnu";
-            # CARGO_BUILD_TARGET = "aarch64-unknown-linux-gnu";
-
-            # This environment variable may be necessary if any of your dependencies use a
-            # build-script which invokes the `cc` crate to build some other code. The `cc` crate
-            # should automatically pick up on our target-specific linker above, but this may be
-            # necessary if the build script needs to compile and run some extra code on the build
-            # system.
-            HOST_CC = "${stdenv.cc.nativePrefix}cc";
           };
 
-        # Assuming the above expression was in a file called myCrate.nix
-        # this would be defined as:
-        # rust-color-echo = pkgs.callPackage ./myCrate.nix { };
-        rust-color-echo = pkgs.callPackage crateExpression { };
+          # cargoExtraArgs = "-Z build-std --target x86_64-unknown-linux-gnu";
+          cargoExtraArgs = "-Z build-std";
+          # cargoExtraArgs = if system == "x86_64-linux"
+          #                  then "-Z build-std --target x86_64-unknown-linux-gnu"
+          #                  else (if system == "x86_64-darwin"
+          #                        then "-Z build-std --target x86_64-apple-"
+          #                  );
+
+          buildInputs = [
+            # Add additional build inputs here
+          ];
+        };
       in
       {
         checks = {
@@ -120,10 +82,15 @@
 
         packages.default = rust-color-echo;
 
-        apps.default = flake-utils.lib.mkApp {
-          drv = pkgs.writeScriptBin "rust-color-echo" ''
-            ${pkgs.pkgsBuildBuild.qemu}/bin/qemu-aarch64 ${rust-color-echo}/bin/rust-color-echo
-          '';
+        devShells.default = craneLib.devShell {
+          # Inherit inputs from checks.
+          checks = self.checks.${system};
+
+          # Extra inputs can be added here; cargo and rustc are provided by default
+          # from the toolchain that was specified earlier.
+          packages = [
+            # rustToolchain
+          ];
         };
       });
 }
